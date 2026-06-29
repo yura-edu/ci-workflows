@@ -1,0 +1,304 @@
+name: Yura New Code Quality (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      language:
+        description: "Project language: typescript | python | java"
+        required: true
+        type: string
+      test_command:
+        description: "Command to run tests and emit lcov"
+        required: true
+        type: string
+      base_ref:
+        description: "Base branch to diff against (e.g. develop)"
+        required: true
+        type: string
+      build_command:
+        description: "Optional build command before tests"
+        required: false
+        type: string
+        default: ""
+      workspace_subdir:
+        description: "Subdirectory to run commands in (optional)"
+        required: false
+        type: string
+        default: "."
+
+permissions:
+  checks: write
+  contents: read
+  pull-requests: read
+
+env:
+  REPORT_NAME: "yura/new-code-report"
+  SCHEMA_VERSION: "1.0"
+  KIND: "yura.new-code"
+
+jobs:
+  new-code-quality:
+    name: Yura — New Code Quality
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.workspace_subdir }}
+
+    steps:
+      # ── 1. Checkout with full history for merge-base ───────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch base branch
+        run: git fetch origin ${{ inputs.base_ref }}:refs/remotes/origin/${{ inputs.base_ref }} --no-tags
+
+      # ── 2. Language-specific setup ──────────────────────────────────────────
+      - name: Setup Node.js
+        if: ${{ inputs.language == 'typescript' || inputs.language == 'javascript' }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Setup Python
+        if: ${{ inputs.language == 'python' }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Setup Java
+        if: ${{ inputs.language == 'java' }}
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "21"
+
+      # ── 3. Install dependencies ──────────────────────────────────────────────
+      - name: Install (npm)
+        if: ${{ inputs.language == 'typescript' || inputs.language == 'javascript' }}
+        run: |
+          if [ -f package-lock.json ]; then npm ci
+          elif [ -f yarn.lock ]; then yarn install --frozen-lockfile
+          elif [ -f pnpm-lock.yaml ]; then npm install -g pnpm && pnpm install --frozen-lockfile
+          else npm install
+          fi
+
+      - name: Install (Python)
+        if: ${{ inputs.language == 'python' }}
+        run: pip install -r requirements.txt || pip install pytest pytest-cov || true
+
+      # ── 4. Optional build ────────────────────────────────────────────────────
+      - name: Build
+        if: ${{ inputs.build_command != '' }}
+        run: ${{ inputs.build_command }}
+        continue-on-error: true
+
+      # ── 5. Run tests + capture result ───────────────────────────────────────
+      - name: Run tests
+        id: run_tests
+        run: ${{ inputs.test_command }}
+        continue-on-error: true
+        env:
+          CI: "true"
+
+      # ── 6. Install analysis tools ────────────────────────────────────────────
+      - name: Install diff-cover
+        run: pip install diff-cover 2>/dev/null || true
+
+      - name: Install semgrep
+        run: pip install semgrep 2>/dev/null || true
+
+      # ── 7. Find lcov file ────────────────────────────────────────────────────
+      - name: Locate lcov
+        id: lcov
+        run: |
+          LCOV_PATH=""
+          for candidate in coverage/lcov.info lcov.info coverage/lcov.dat; do
+            if [ -f "$candidate" ]; then
+              LCOV_PATH="$candidate"
+              break
+            fi
+          done
+          echo "path=$LCOV_PATH" >> "$GITHUB_OUTPUT"
+
+      # ── 8. diff-cover ────────────────────────────────────────────────────────
+      - name: Run diff-cover
+        id: diff_cover
+        if: ${{ steps.lcov.outputs.path != '' }}
+        run: |
+          REPORT=$(diff-cover "${{ steps.lcov.outputs.path }}" \
+            --compare-branch=origin/${{ inputs.base_ref }} \
+            --json-report=/tmp/diff-cover-report.json 2>/dev/null || echo "{}")
+          PCT="null"
+          COVERED="null"
+          TOTAL="null"
+          if [ -f /tmp/diff-cover-report.json ]; then
+            PCT=$(python3 -c "import json,sys; d=json.load(open('/tmp/diff-cover-report.json')); print(d.get('coverage_percent','null'))" 2>/dev/null || echo "null")
+            COVERED=$(python3 -c "import json; d=json.load(open('/tmp/diff-cover-report.json')); print(d.get('covered_lines','null'))" 2>/dev/null || echo "null")
+            TOTAL=$(python3 -c "import json; d=json.load(open('/tmp/diff-cover-report.json')); print(d.get('total_lines','null'))" 2>/dev/null || echo "null")
+          fi
+          echo "pct=$PCT" >> "$GITHUB_OUTPUT"
+          echo "covered=$COVERED" >> "$GITHUB_OUTPUT"
+          echo "total=$TOTAL" >> "$GITHUB_OUTPUT"
+        continue-on-error: true
+
+      # ── 9. Semgrep diff-aware ────────────────────────────────────────────────
+      - name: Run semgrep (diff-aware)
+        id: semgrep
+        run: |
+          SEMGREP_JSON="{\"counts\":{\"error\":0,\"warning\":0,\"info\":0},\"newFindings\":[]}"
+          if command -v semgrep &>/dev/null; then
+            semgrep \
+              --baseline-commit origin/${{ inputs.base_ref }} \
+              --json \
+              --config auto \
+              --output /tmp/semgrep-report.json \
+              . 2>/dev/null || true
+            if [ -f /tmp/semgrep-report.json ]; then
+              SEMGREP_JSON=$(python3 - <<'PYEOF'
+import json, sys
+try:
+    d = json.load(open('/tmp/semgrep-report.json'))
+    results = d.get('results', [])
+    counts = {'error': 0, 'warning': 0, 'info': 0}
+    findings = []
+    for r in results:
+        sev = r.get('extra', {}).get('severity', 'INFO').upper()
+        key = 'error' if sev == 'ERROR' else ('warning' if sev == 'WARNING' else 'info')
+        counts[key] += 1
+        findings.append({
+            'ruleId': r.get('check_id', ''),
+            'severity': sev,
+            'path': r.get('path', ''),
+            'line': r.get('start', {}).get('line', None)
+        })
+    print(json.dumps({'counts': counts, 'newFindings': findings}))
+except Exception as e:
+    print('{"counts":{"error":0,"warning":0,"info":0},"newFindings":[]}')
+PYEOF
+)
+            fi
+          fi
+          echo "json<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$SEMGREP_JSON" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+        continue-on-error: true
+
+      # ── 10. Build structured JSON report ────────────────────────────────────
+      - name: Build report JSON
+        id: report
+        env:
+          TESTS_OUTCOME: ${{ steps.run_tests.outcome }}
+          DIFF_COVER_PCT: ${{ steps.diff_cover.outputs.pct }}
+          DIFF_COVER_COVERED: ${{ steps.diff_cover.outputs.covered }}
+          DIFF_COVER_TOTAL: ${{ steps.diff_cover.outputs.total }}
+          SEMGREP_JSON: ${{ steps.semgrep.outputs.json }}
+          HEAD_SHA: ${{ github.sha }}
+          BASE_REF: ${{ inputs.base_ref }}
+        run: |
+          python3 - <<'PYEOF'
+          import json, os
+          tests_passed = os.environ.get('TESTS_OUTCOME') == 'success'
+          pct_raw = os.environ.get('DIFF_COVER_PCT', 'null')
+          covered_raw = os.environ.get('DIFF_COVER_COVERED', 'null')
+          total_raw = os.environ.get('DIFF_COVER_TOTAL', 'null')
+          def to_num(v):
+              try: return float(v) if '.' in str(v) else int(v)
+              except: return None
+          semgrep_raw = os.environ.get('SEMGREP_JSON', '{}')
+          try:
+              semgrep = json.loads(semgrep_raw)
+          except:
+              semgrep = {'counts': {'error': 0, 'warning': 0, 'info': 0}, 'newFindings': []}
+          report = {
+              'schemaVersion': '1.0',
+              'kind': 'yura.new-code',
+              'headSha': os.environ.get('HEAD_SHA', ''),
+              'baseRef': os.environ.get('BASE_REF', ''),
+              'tests': {
+                  'passed': tests_passed,
+                  'total': None,
+                  'failures': None,
+              },
+              'diffCoverage': {
+                  'pct': to_num(pct_raw),
+                  'coveredLines': to_num(covered_raw),
+                  'totalNewLines': to_num(total_raw),
+              },
+              'semgrep': semgrep,
+          }
+          with open('/tmp/yura-new-code-report.json', 'w') as f:
+              json.dump(report, f)
+          print(json.dumps(report, indent=2))
+          PYEOF
+
+      # ── 11. Create check_run via Checks API ──────────────────────────────────
+      - name: Publish check_run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          REPORT_TEXT=$(cat /tmp/yura-new-code-report.json)
+          SEMGREP_JSON=$(python3 -c "
+          import json
+          try:
+              d = json.loads(open('/tmp/yura-new-code-report.json').read())
+              findings = d.get('semgrep', {}).get('newFindings', [])
+              annotations = []
+              for f in findings[:50]:
+                  annotations.append({
+                      'path': f.get('path', 'unknown'),
+                      'start_line': f.get('line') or 1,
+                      'end_line': f.get('line') or 1,
+                      'annotation_level': 'warning' if f.get('severity','') in ('WARNING','INFO') else 'failure',
+                      'message': f'Semgrep [{f.get(\"severity\",\"\")}] {f.get(\"ruleId\",\"\")}',
+                      'title': f.get('ruleId', 'finding'),
+                  })
+              print(json.dumps(annotations))
+          except:
+              print('[]')
+          ")
+
+          python3 - <<PYEOF
+          import json, os, urllib.request, urllib.error
+          token = os.environ['GH_TOKEN']
+          repo = os.environ['REPO']
+          sha = os.environ['HEAD_SHA']
+          report_text = open('/tmp/yura-new-code-report.json').read()
+          try:
+              annotations = json.loads('''$SEMGREP_JSON''')
+          except:
+              annotations = []
+          payload = {
+              'name': 'yura/new-code-report',
+              'head_sha': sha,
+              'status': 'completed',
+              'conclusion': 'neutral',
+              'output': {
+                  'title': 'Yura — New Code Quality Report',
+                  'summary': 'Diff-aware analysis (Semgrep + diff-cover). Severity computed by the Yura backend.',
+                  'text': report_text,
+                  'annotations': annotations[:50],
+              },
+          }
+          data = json.dumps(payload).encode('utf-8')
+          req = urllib.request.Request(
+              f'https://api.github.com/repos/{repo}/check-runs',
+              data=data,
+              headers={
+                  'Authorization': f'token {token}',
+                  'Accept': 'application/vnd.github.v3+json',
+                  'Content-Type': 'application/json',
+              },
+              method='POST',
+          )
+          try:
+              with urllib.request.urlopen(req) as resp:
+                  print('check_run created:', resp.status)
+          except urllib.error.HTTPError as e:
+              print('Failed to create check_run:', e.code, e.read().decode())
+              raise
+          PYEOF
