@@ -158,27 +158,27 @@ jobs:
               . 2>/dev/null || true
             if [ -f /tmp/semgrep-report.json ]; then
               SEMGREP_JSON=$(python3 - <<'PYEOF'
-import json, sys
-try:
-    d = json.load(open('/tmp/semgrep-report.json'))
-    results = d.get('results', [])
-    counts = {'error': 0, 'warning': 0, 'info': 0}
-    findings = []
-    for r in results:
-        sev = r.get('extra', {}).get('severity', 'INFO').upper()
-        key = 'error' if sev == 'ERROR' else ('warning' if sev == 'WARNING' else 'info')
-        counts[key] += 1
-        findings.append({
-            'ruleId': r.get('check_id', ''),
-            'severity': sev,
-            'path': r.get('path', ''),
-            'line': r.get('start', {}).get('line', None)
-        })
-    print(json.dumps({'counts': counts, 'newFindings': findings}))
-except Exception as e:
-    print('{"counts":{"error":0,"warning":0,"info":0},"newFindings":[]}')
-PYEOF
-)
+          import json, sys
+          try:
+              d = json.load(open('/tmp/semgrep-report.json'))
+              results = d.get('results', [])
+              counts = {'error': 0, 'warning': 0, 'info': 0}
+              findings = []
+              for r in results:
+                  sev = r.get('extra', {}).get('severity', 'INFO').upper()
+                  key = 'error' if sev == 'ERROR' else ('warning' if sev == 'WARNING' else 'info')
+                  counts[key] += 1
+                  findings.append({
+                      'ruleId': r.get('check_id', ''),
+                      'severity': sev,
+                      'path': r.get('path', ''),
+                      'line': r.get('start', {}).get('line', None)
+                  })
+              print(json.dumps({'counts': counts, 'newFindings': findings}))
+          except Exception as e:
+              print('{"counts":{"error":0,"warning":0,"info":0},"newFindings":[]}')
+          PYEOF
+          )
             fi
           fi
           echo "json<<EOF" >> "$GITHUB_OUTPUT"
