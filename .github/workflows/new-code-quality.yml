@@ -75,12 +75,22 @@ jobs:
           java-version: "21"
 
       # ── 3. Install dependencies ──────────────────────────────────────────────
+      # continue-on-error: a dependency install failure must NOT abort the job
+      # before the report is published — otherwise `yura/new-code` stays stuck at
+      # "Expected — Waiting for status to be reported" forever (branch protection
+      # requires it, but nothing ever posts it). A failed install instead flows
+      # through as tests=failed in the report below.
+      # --strict-dep-builds=false: pnpm 10 exits non-zero (ERR_PNPM_IGNORED_BUILDS)
+      # when deps have unreviewed build scripts (e.g. @prisma/client, esbuild).
+      # This analysis only needs deps present for the JS tests, so downgrade that
+      # hard error to a warning.
       - name: Install (npm)
         if: ${{ inputs.language == 'typescript' || inputs.language == 'javascript' }}
+        continue-on-error: true
         run: |
           if [ -f package-lock.json ]; then npm ci
           elif [ -f yarn.lock ]; then yarn install --frozen-lockfile
-          elif [ -f pnpm-lock.yaml ]; then npm install -g pnpm && pnpm install --frozen-lockfile
+          elif [ -f pnpm-lock.yaml ]; then npm install -g pnpm@10 && pnpm install --frozen-lockfile --strict-dep-builds=false
           else npm install
           fi
 
@@ -188,6 +198,7 @@ jobs:
       # ── 10. Build structured JSON report ────────────────────────────────────
       - name: Build report JSON
         id: report
+        if: ${{ always() }}
         env:
           TESTS_OUTCOME: ${{ steps.run_tests.outcome }}
           DIFF_COVER_PCT: ${{ steps.diff_cover.outputs.pct }}
@@ -234,7 +245,12 @@ jobs:
           PYEOF
 
       # ── 11. Create check_run via Checks API ──────────────────────────────────
+      # always(): the check_run named `yura/new-code-report` is the ONLY signal
+      # that lets the Yura backend post the required `yura/new-code` commit status.
+      # It must be emitted even when earlier steps failed, or the PR check hangs
+      # on "Waiting for status to be reported" indefinitely.
       - name: Publish check_run
+        if: ${{ always() }}
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
