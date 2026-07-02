@@ -205,7 +205,11 @@ jobs:
           DIFF_COVER_COVERED: ${{ steps.diff_cover.outputs.covered }}
           DIFF_COVER_TOTAL: ${{ steps.diff_cover.outputs.total }}
           SEMGREP_JSON: ${{ steps.semgrep.outputs.json }}
-          HEAD_SHA: ${{ github.sha }}
+          # For pull_request events github.sha is the ephemeral MERGE commit, not
+          # the PR head. Yura resolves the PR by head_sha (must equal
+          # pull_requests.head_sha), so stamp the real head; fall back to
+          # github.sha for push-triggered callers.
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           BASE_REF: ${{ inputs.base_ref }}
         run: |
           python3 - <<'PYEOF'
@@ -254,7 +258,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          HEAD_SHA: ${{ github.sha }}
+          # For pull_request events github.sha is the ephemeral MERGE commit, not
+          # the PR head. Yura resolves the PR by head_sha (must equal
+          # pull_requests.head_sha), so stamp the real head; fall back to
+          # github.sha for push-triggered callers.
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           REPORT_TEXT=$(cat /tmp/yura-new-code-report.json)
           SEMGREP_JSON=$(python3 -c "
