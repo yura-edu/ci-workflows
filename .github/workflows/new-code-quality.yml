@@ -75,22 +75,25 @@ jobs:
           java-version: "21"
 
       # ── 3. Install dependencies ──────────────────────────────────────────────
-      # continue-on-error: a dependency install failure must NOT abort the job
-      # before the report is published — otherwise `yura/new-code` stays stuck at
-      # "Expected — Waiting for status to be reported" forever (branch protection
-      # requires it, but nothing ever posts it). A failed install instead flows
-      # through as tests=failed in the report below.
-      # --strict-dep-builds=false: pnpm 10 exits non-zero (ERR_PNPM_IGNORED_BUILDS)
-      # when deps have unreviewed build scripts (e.g. @prisma/client, esbuild).
-      # This analysis only needs deps present for the JS tests, so downgrade that
-      # hard error to a warning.
+      # continue-on-error (paired with `if: always()` on the report/publish steps):
+      # a dependency install failure must NOT abort the job before the report is
+      # published — otherwise `yura/new-code` stays stuck at "Waiting for status to
+      # be reported" forever. A failed install instead flows through as tests=failed.
+      # pnpm_config_strict_dep_builds=false: pnpm 10 (strictDepBuilds defaults to
+      # true) exits non-zero on ERR_PNPM_IGNORED_BUILDS when deps have unreviewed
+      # build scripts (@prisma/client, @nestjs/core, ...). This MUST be set as an
+      # env var — pnpm does NOT accept `--strict-dep-builds` as an install CLI flag
+      # (it errors "Unknown option" and installs nothing). Deps still install; the
+      # JS test run below only needs the packages present, not their native builds.
       - name: Install (npm)
         if: ${{ inputs.language == 'typescript' || inputs.language == 'javascript' }}
         continue-on-error: true
+        env:
+          pnpm_config_strict_dep_builds: "false"
         run: |
           if [ -f package-lock.json ]; then npm ci
           elif [ -f yarn.lock ]; then yarn install --frozen-lockfile
-          elif [ -f pnpm-lock.yaml ]; then npm install -g pnpm@10 && pnpm install --frozen-lockfile --strict-dep-builds=false
+          elif [ -f pnpm-lock.yaml ]; then npm install -g pnpm@10 && pnpm install --frozen-lockfile
           else npm install
           fi
 
